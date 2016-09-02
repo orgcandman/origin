@@ -48,6 +48,10 @@ func NewFake(bridge string) Interface {
 	return &ovsFake{bridge: bridge}
 }
 
+func (fake *ovsFake) SupportsConnectionTracking() (bool, error) {
+	return true, nil
+}
+
 func (fake *ovsFake) AddBridge(properties ...string) error {
 	fake.ports = make(map[string]int)
 	fake.flows = make([]ovsFlow, 0)

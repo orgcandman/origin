@@ -13,6 +13,8 @@ import (
 
 // Interface represents an interface to OVS
 type Interface interface {
+	SupportsConnectionTracking() (bool, error)
+
 	// AddBridge creates the bridge associated with the interface, optionally setting
 	// properties on it (as with "ovs-vsctl set Bridge ..."). If the bridge already
 	// existed, it will be destroyed and recreated.
@@ -100,7 +102,7 @@ type ovsExec struct {
 }
 
 // New returns a new ovs.Interface
-func New(execer exec.Interface, bridge string, minVersion string) (Interface, error) {
+func New(execer exec.Interface, bridge string) (Interface, error) {
 	if _, err := execer.LookPath(OVS_OFCTL); err != nil {
 		return nil, fmt.Errorf("OVS is not installed")
 	}
@@ -108,28 +110,31 @@ func New(execer exec.Interface, bridge string, minVersion string) (Interface, er
 		return nil, fmt.Errorf("OVS is not installed")
 	}
 
-	ovsif := &ovsExec{execer: execer, bridge: bridge}
+	return &ovsExec{execer: execer, bridge: bridge}, nil
+}
 
-	if minVersion != "" {
-		minVer := utilversion.MustParseGeneric(minVersion)
+const ovsConnTrackingVersion = "2.5.0"
 
-		out, err := ovsif.exec(OVS_VSCTL, "--version")
-		if err != nil {
-			return nil, fmt.Errorf("could not check OVS version is %s or higher", minVersion)
-		}
-		// First output line should end with version
-		lines := strings.Split(out, "\n")
-		spc := strings.LastIndex(lines[0], " ")
-		instVer, err := utilversion.ParseGeneric(lines[0][spc+1:])
-		if err != nil {
-			return nil, fmt.Errorf("could not find OVS version in %q", lines[0])
-		}
-		if !instVer.AtLeast(minVer) {
-			return nil, fmt.Errorf("found OVS %v, need %s or later", instVer, minVersion)
-		}
+// SupportsConnectionTracking returns true if the install OVS version supports connection tracking
+func (ovsif *ovsExec) SupportsConnectionTracking() (bool, error) {
+	minVer := utilversion.MustParseGeneric(ovsConnTrackingVersion)
+
+	out, err := ovsif.exec(OVS_VSCTL, "--version")
+	if err != nil {
+		return false, fmt.Errorf("could not check OVS version")
+	}
+	// First output line should end with version
+	lines := strings.Split(out, "\n")
+	spc := strings.LastIndex(lines[0], " ")
+	instVer, err := utilversion.ParseGeneric(lines[0][spc+1:])
+	if err != nil {
+		return false, fmt.Errorf("could not find OVS version in %q", lines[0])
+	}
+	if !instVer.AtLeast(minVer) {
+		return false, fmt.Errorf("found OVS %v, need %s or later", instVer, ovsConnTrackingVersion)
 	}
 
-	return ovsif, nil
+	return true, nil
 }
 
 func (ovsif *ovsExec) exec(cmd string, args ...string) (string, error) {

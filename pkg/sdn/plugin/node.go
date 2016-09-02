@@ -77,7 +77,7 @@ type OsdnNode struct {
 func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclientset.Clientset, hostname string, selfIP string, iptablesSyncPeriod time.Duration, mtu uint32) (*OsdnNode, error) {
 	var policy osdnPolicy
 	var pluginId int
-	var minOvsVersion string
+	var needConnectionTracking bool
 	switch strings.ToLower(pluginName) {
 	case osapi.SingleTenantPluginName:
 		policy = NewSingleTenantPlugin()
@@ -88,7 +88,7 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 	case osapi.NetworkPolicyPluginName:
 		policy = NewNetworkPolicyPlugin()
 		pluginId = 2
-		minOvsVersion = "2.5.0"
+		needConnectionTracking = true
 	default:
 		// Not an OpenShift plugin
 		return nil, nil
@@ -118,9 +118,14 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 		}
 	}
 
-	ovsif, err := ovs.New(kexec.New(), BR, minOvsVersion)
+	ovsif, err := ovs.New(kexec.New(), BR)
 	if err != nil {
 		return nil, err
+	}
+	if needConnectionTracking {
+		if _, err = ovsif.SupportsConnectionTracking(); err != nil {
+			return nil, fmt.Errorf("plugin %q requires OVS connection tracking support: %v", pluginName, err)
+		}
 	}
 
 	plugin := &OsdnNode{
