@@ -165,7 +165,7 @@ func (plugin *OsdnNode) SetupSDN() (bool, error) {
 		return false, err
 	}
 
-	err = plugin.oc.SetupOVS(clusterNetworkCIDR, serviceNetworkCIDR, localSubnetCIDR, localSubnetGateway)
+	err = plugin.oc.SetupOVS(clusterNetworkCIDR, serviceNetworkCIDR, localSubnetCIDR, localSubnetGateway, plugin.masqServices)
 	if err != nil {
 		return false, err
 	}

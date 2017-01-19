@@ -73,6 +73,9 @@ const (
 
 	// the mark-for-drop chain
 	KubeMarkDropChain utiliptables.Chain = "KUBE-MARK-DROP"
+
+	// the mark-for-OVS-handling chain
+	KubeMarkOVSChain utiliptables.Chain = "KUBE-MARK-OVS"
 )
 
 // IPTablesVersioner can query the current iptables version.
@@ -328,7 +331,7 @@ func CleanupLeftovers(ipt utiliptables.Interface) (encounteredError bool) {
 		natRules := bytes.NewBuffer(nil)
 		writeLine(natChains, "*nat")
 		// Start with chains we know we need to remove.
-		for _, chain := range []utiliptables.Chain{kubeServicesChain, kubeNodePortsChain, kubePostroutingChain, KubeMarkMasqChain} {
+		for _, chain := range []utiliptables.Chain{kubeServicesChain, kubeNodePortsChain, kubePostroutingChain, KubeMarkMasqChain, KubeMarkOVSChain} {
 			if _, found := existingNATChains[chain]; found {
 				chainString := string(chain)
 				writeLine(natChains, existingNATChains[chain]) // flush
@@ -900,6 +903,11 @@ func (proxier *Proxier) syncProxyRules() {
 	} else {
 		writeLine(natChains, utiliptables.MakeChainLine(KubeMarkMasqChain))
 	}
+	if chain, ok := existingNATChains[KubeMarkOVSChain]; ok {
+		writeLine(natChains, chain)
+	} else {
+		writeLine(natChains, utiliptables.MakeChainLine(KubeMarkOVSChain))
+	}
 
 	// Install the kubernetes-specific postrouting rules. We use a whole chain for
 	// this so that it is easier to flush and change, for example if the mark
@@ -917,6 +925,12 @@ func (proxier *Proxier) syncProxyRules() {
 	writeLine(natRules, []string{
 		"-A", string(KubeMarkMasqChain),
 		"-j", "MARK", "--set-xmark", proxier.masqueradeMark,
+	}...)
+
+	// Install the OpenShift-specific mark-for-OVS-processing rule.
+	writeLine(natRules, []string{
+		"-A", string(KubeMarkOVSChain),
+		"-j", "CONNMARK", "--set-xmark", "1",
 	}...)
 
 	// Accumulate NAT chains to keep.
@@ -1200,6 +1214,9 @@ func (proxier *Proxier) syncProxyRules() {
 			writeLine(natRules, append(args,
 				"-s", fmt.Sprintf("%s/32", strings.Split(endpoints[i].ip, ":")[0]),
 				"-j", string(KubeMarkMasqChain))...)
+			// Mark for special OVS processing
+			writeLine(natRules, append(args,
+				"-j", string(KubeMarkOVSChain))...)
 			// Update client-affinity lists.
 			if svcInfo.sessionAffinityType == api.ServiceAffinityClientIP {
 				args = append(args, "-m", "recent", "--name", string(endpointChain), "--set")

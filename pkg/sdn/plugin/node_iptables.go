@@ -23,15 +23,17 @@ type NodeIPTables struct {
 	ipt                iptables.Interface
 	clusterNetworkCIDR string
 	syncPeriod         time.Duration
+	masqServices       bool
 
 	mu sync.Mutex // Protects concurrent access to syncIPTableRules()
 }
 
-func newNodeIPTables(clusterNetworkCIDR string, syncPeriod time.Duration) *NodeIPTables {
+func newNodeIPTables(clusterNetworkCIDR string, syncPeriod time.Duration, masqServices bool) *NodeIPTables {
 	return &NodeIPTables{
 		ipt:                iptables.New(kexec.New(), utildbus.New(), iptables.ProtocolIpv4),
 		clusterNetworkCIDR: clusterNetworkCIDR,
 		syncPeriod:         syncPeriod,
+		masqServices:       masqServices,
 	}
 }
 
@@ -92,12 +94,17 @@ const VXLAN_PORT = "4789"
 
 // Get openshift iptables rules
 func (n *NodeIPTables) getStaticNodeIPTablesRules() []FirewallRule {
-	return []FirewallRule{
-		{"nat", "POSTROUTING", []string{"-s", n.clusterNetworkCIDR, "-j", "MASQUERADE"}},
+	rules := []FirewallRule{
 		{"filter", "INPUT", []string{"-p", "udp", "-m", "multiport", "--dports", VXLAN_PORT, "-m", "comment", "--comment", "001 vxlan incoming", "-j", "ACCEPT"}},
 		{"filter", "INPUT", []string{"-i", TUN, "-m", "comment", "--comment", "traffic from SDN", "-j", "ACCEPT"}},
 		{"filter", "INPUT", []string{"-i", "docker0", "-m", "comment", "--comment", "traffic from docker", "-j", "ACCEPT"}},
 		{"filter", "FORWARD", []string{"-d", n.clusterNetworkCIDR, "-j", "ACCEPT"}},
 		{"filter", "FORWARD", []string{"-s", n.clusterNetworkCIDR, "-j", "ACCEPT"}},
 	}
+	if n.masqServices {
+		rules = append(rules, FirewallRule{"nat", "POSTROUTING", []string{"-s", n.clusterNetworkCIDR, "-j", "MASQUERADE"}})
+	} else {
+		rules = append(rules, FirewallRule{"nat", "POSTROUTING", []string{"-s", n.clusterNetworkCIDR, "!", "-d", n.clusterNetworkCIDR, "-j", "MASQUERADE"}})
+	}
+	return rules
 }

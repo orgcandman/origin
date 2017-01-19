@@ -57,6 +57,7 @@ type OsdnNode struct {
 	localSubnetCIDR    string
 	localIP            string
 	hostName           string
+	masqServices       bool
 	podNetworkReady    chan struct{}
 	kubeletInitReady   chan struct{}
 	iptablesSyncPeriod time.Duration
@@ -122,10 +123,9 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 	if err != nil {
 		return nil, err
 	}
-	if needConnectionTracking {
-		if _, err = ovsif.SupportsConnectionTracking(); err != nil {
-			return nil, fmt.Errorf("plugin %q requires OVS connection tracking support: %v", pluginName, err)
-		}
+	supportsConnectionTracking, err := ovsif.SupportsConnectionTracking()
+	if needConnectionTracking && !supportsConnectionTracking {
+		return nil, fmt.Errorf("plugin %q requires OVS connection tracking support: %v", pluginName, err)
 	}
 
 	plugin := &OsdnNode{
@@ -135,6 +135,7 @@ func NewNodePlugin(pluginName string, osClient *osclient.Client, kClient *kclien
 		oc:                 NewOVSController(ovsif, pluginId),
 		localIP:            selfIP,
 		hostName:           hostname,
+		masqServices:       !supportsConnectionTracking,
 		podNetworkReady:    make(chan struct{}),
 		kubeletInitReady:   make(chan struct{}),
 		iptablesSyncPeriod: iptablesSyncPeriod,
@@ -216,7 +217,7 @@ func (node *OsdnNode) Start() error {
 		return fmt.Errorf("failed to get network information: %v", err)
 	}
 
-	nodeIPTables := newNodeIPTables(node.networkInfo.ClusterNetwork.String(), node.iptablesSyncPeriod)
+	nodeIPTables := newNodeIPTables(node.networkInfo.ClusterNetwork.String(), node.iptablesSyncPeriod, node.masqServices)
 	if err = nodeIPTables.Setup(); err != nil {
 		return fmt.Errorf("failed to set up iptables: %v", err)
 	}
@@ -239,7 +240,9 @@ func (node *OsdnNode) Start() error {
 	if err = node.policy.Start(node); err != nil {
 		return err
 	}
-	go kwait.Forever(node.watchServices, 0)
+	if node.masqServices {
+		go kwait.Forever(node.watchServices, 0)
+	}
 
 	// Wait for kubelet to init the plugin so we get a knetwork.Host
 	log.V(5).Infof("Waiting for kubelet network plugin initialization")
