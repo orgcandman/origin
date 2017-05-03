@@ -131,20 +131,9 @@ function stop() {
 
   echo "Stopping dind cluster '${cluster_id}'"
 
-  local master_cid
-  master_cid="$(${DOCKER_CMD} ps -qa --filter "name=${MASTER_NAME}")"
-  if [[ "${master_cid}" ]]; then
-    ${DOCKER_CMD} rm -f "${master_cid}" > /dev/null
-  fi
-
-  local node_cids
-  node_cids="$(${DOCKER_CMD} ps -qa --filter "name=${NODE_PREFIX}")"
-  if [[ "${node_cids}" ]]; then
-    node_cids=(${node_cids//\n/ })
-    for cid in "${node_cids[@]}"; do
-      ${DOCKER_CMD} rm -f "${cid}" > /dev/null
-    done
-  fi
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${MASTER_NAME}|${NODE_PREFIX}" ); do
+    ${DOCKER_CMD} rm -f "${cid}" > /dev/null
+  done
 
   # Cleaning up configuration to avoid conflict with a future cluster
   # The container will have created configuration as root
@@ -158,6 +147,88 @@ function stop() {
   for volume in $( ${DOCKER_CMD} volume ls -qf dangling=true ); do
     ${DOCKER_CMD} volume rm "${volume}" > /dev/null
   done
+}
+
+function pause() {
+  local cluster_id=$1
+
+  echo "Pausing dind cluster '${cluster_id}'"
+
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${MASTER_NAME}|${NODE_PREFIX}" ); do
+    ${DOCKER_CMD} stop "${cid}" > /dev/null &
+  done
+
+  wait
+}
+
+function resume() {
+  local config_root=$1
+  local cluster_id=$2
+  local wait_for_cluster=$3
+
+  echo "Resuming dind cluster '${cluster_id}'"
+
+  echo "  Starting master"
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${MASTER_NAME}" ); do
+    ${DOCKER_CMD} start "${cid}" > /dev/null
+  done
+
+  wait-for-master "${config_root}"
+
+  echo "  Starting nodes"
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${NODE_PREFIX}" ); do
+    ${DOCKER_CMD} start "${cid}" > /dev/null
+  done
+
+  if [[ -n "${wait_for_cluster}" ]]; then
+    wait-for-cluster "${config_root}" "$(count-nodes)"
+  fi
+}
+
+function run_on_nodes() {
+  local filter=$1
+  shift
+  local command=("$@")
+
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${filter}" ); do
+    ${DOCKER_CMD} exec "${cid}" "${command[@]}"
+  done
+}
+
+function count-nodes() {
+  local node_count=0
+  for cid in $( ${DOCKER_CMD} ps -qa --filter "name=${NODE_PREFIX}" ); do
+    (( node_count += 1 ))
+  done
+
+  echo "$node_count"
+}
+
+function refresh() {
+  local origin_root=$1
+  local config_root=$2
+  local cluster_id=$3
+  local wait_for_cluster=$4
+
+  echo "Refreshing dind cluster '${cluster_id}'"
+
+  # Stop the master and node openshift processes
+  echo "  Stopping master and node processes in cluster '${cluster_id}'..."
+  run_on_nodes "${MASTER_NAME}"                systemctl stop openshift-master.service
+  run_on_nodes "${MASTER_NAME}|${NODE_PREFIX}" systemctl stop openshift-node.service
+
+  # Copy over the new openshift binaries
+  echo "  Copying new runtime to cluster '${cluster_id}'..."
+  copy-runtime "${origin_root}" "${config_root}/"
+
+  # Restart the master and node openshift processes
+  echo "  Restarting master and node processes in cluster '${cluster_id}'..."
+  run_on_nodes "${MASTER_NAME}"                systemctl start openshift-master.service
+  run_on_nodes "${MASTER_NAME}|${NODE_PREFIX}" systemctl start openshift-node.service
+
+  if [[ -n "${wait_for_cluster}" ]]; then
+    wait-for-cluster "${config_root}" "$(count-nodes)"
+  fi
 }
 
 function check-selinux() {
@@ -212,17 +283,25 @@ function copy-runtime() {
   cp "${osdn_plugin_path}/sdn-cni-plugin/80-openshift-sdn.conf" "${target}"
 }
 
+function wait-for-master() {
+  local config_root=$1
+
+  local kubeconfig="$(get-admin-config "${config_root}")"
+  local oc="$(os::util::find::built_binary oc)"
+
+  # wait for healthz to report ok before trying to get nodes
+  os::util::wait-for-condition "ok" "${oc} get --config=${kubeconfig} --raw=/healthz" "120"
+}
+
 function wait-for-cluster() {
   local config_root=$1
   local expected_node_count=$2
 
-  # Increment the node count to ensure that the sdn node also reports readiness
-  (( expected_node_count++ ))
+  # Increment the node count to ensure that the sdn node on the master also reports readiness
+  (( expected_node_count += 1 ))
 
-  local kubeconfig
-  kubeconfig="$(get-admin-config "${config_root}")"
-  local oc
-  oc="$(os::util::find::built_binary oc)"
+  local kubeconfig="$(get-admin-config "${config_root}")"
+  local oc="$(os::util::find::built_binary oc)"
 
   # wait for healthz to report ok before trying to get nodes
   os::util::wait-for-condition "ok" "${oc} get --config=${kubeconfig} --raw=/healthz" "120"
@@ -250,6 +329,7 @@ function nodes-are-ready() {
   {{end}}
 {{end}}
 EOF
+
   # Remove formatting before use
   template="$(echo "${template}" | tr -d '\n' | sed -e 's/} \+/}/g')"
   local count
@@ -277,7 +357,14 @@ function build-image() {
   popd > /dev/null
 }
 
-DOCKER_CMD=${DOCKER_CMD:-"sudo docker"}
+
+## Start of the main program
+
+DEFAULT_DOCKER_CMD="sudo docker"
+if [[ -w "/var/run/docker.sock" ]]; then
+  DEFAULT_DOCKER_CMD="docker"
+fi
+DOCKER_CMD="${DOCKER_CMD:-$DEFAULT_DOCKER_CMD}"
 
 CLUSTER_ID="${OPENSHIFT_CLUSTER_ID:-openshift}"
 
@@ -360,37 +447,117 @@ case "${1:-""}" in
     NETWORK_PLUGIN="$(get-network-plugin "${NETWORK_PLUGIN}")"
     start "${OS_ROOT}" "${CONFIG_ROOT}" "${DEPLOYED_CONFIG_ROOT}" \
           "${CLUSTER_ID}" "${NETWORK_PLUGIN}" "${WAIT_FOR_CLUSTER}" \
-          "${NODE_COUNT}" "${ADDITIONAL_ARGS}" "${NODE_PREFIX}"
+          "${NODE_COUNT}" "${ADDITIONAL_ARGS}"
     ;;
   stop)
     stop "${CONFIG_ROOT}" "${CLUSTER_ID}"
     ;;
+  refresh)
+    BUILD=
+    BUILD_IMAGES=
+    WAIT_FOR_CLUSTER=1
+    OPTIND=2
+    while getopts ":bis" opt; do
+      case $opt in
+        b)
+          BUILD=1
+          ;;
+        i)
+          BUILD_IMAGES=1
+          ;;
+        s)
+          WAIT_FOR_CLUSTER=
+          ;;
+        \?)
+          echo "Invalid option: -${OPTARG}" >&2
+          exit 1
+          ;;
+        :)
+          echo "Option -${OPTARG} requires an argument." >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    # Build origin if requested or required
+    if [[ -n "${BUILD}" ]] || ! os::util::find::built_binary 'oc' >/dev/null 2>&1; then
+      "${OS_ROOT}/hack/build-go.sh"
+    fi
+
+    # Build images if requested or required
+    if [[ -n "${BUILD_IMAGES}" ||
+            -z "$(${DOCKER_CMD} images -q ${MASTER_IMAGE})" ]]; then
+      build-images "${OS_ROOT}"
+    fi
+
+    refresh "${OS_ROOT}" "${CONFIG_ROOT}" "${CLUSTER_ID}" "${WAIT_FOR_CLUSTER}"
+    ;;
+  pause)
+    pause "${CLUSTER_ID}"
+    ;;
+  resume)
+    WAIT_FOR_CLUSTER=1
+    OPTIND=2
+    while getopts ":s" opt; do
+      case $opt in
+        s)
+          WAIT_FOR_CLUSTER=
+          ;;
+        \?)
+          echo "Invalid option: -${OPTARG}" >&2
+          exit 1
+          ;;
+        :)
+          echo "Option -${OPTARG} requires an argument." >&2
+          exit 1
+          ;;
+      esac
+    done
+
+    resume "${CONFIG_ROOT}" "${CLUSTER_ID}" "${WAIT_FOR_CLUSTER}"
+    ;;
   wait-for-cluster)
     wait-for-cluster "${CONFIG_ROOT}" "${NODE_COUNT}"
+    ;;
+  wait-for-master)
+    wait-for-master "${CONFIG_ROOT}"
     ;;
   build-images)
     build-images "${OS_ROOT}"
     ;;
   *)
-    >&2 echo "Usage: $0 {start|stop|wait-for-cluster|build-images} [options]
+    >&2 echo "Usage: $0 {start|stop|refresh|pause|resume|wait-for-cluster|build-images} [options]
+
+- start: Starts the containers in an openshift docker-in-docker environment
+- stop: Destroys the docker containers for the docker-in-docker environment
+- refresh: Refreshes the openshift binaries in the containers and reloads the processes
+- pause: Stops running containers, but leaves the state around
+- resume: Restarts paused containers
+- wait-for-cluster: Waits for a cluster to come online
+- build-images: Builds the docker-in-docker images themselves
+
 
 start accepts the following options:
 
  -n [net plugin]   the name of the network plugin to deploy
-
  -N                number of nodes in the cluster
-
  -b                build origin before starting the cluster
-
  -i                build container images before starting the cluster
-
  -r                remove an existing cluster
-
  -s                skip waiting for nodes to become ready
 
 Any of the arguments that would be used in creating openshift master can be passed
-as is to the script  after '--' ex: setting host subnet to 3
+as is to the script after '--' ex: setting host subnet to 3
 ./dind-cluster.sh start -- --host-subnet-length=3
+
+
+refresh accepts the following options:
+ -b                build origin before starting the cluster
+ -i                build container images before starting the cluster
+ -s                skip waiting for nodes to become ready
+
+resume accepts the following option:
+ -s                skip waiting for nodes to become ready
 "
     exit 2
 esac
