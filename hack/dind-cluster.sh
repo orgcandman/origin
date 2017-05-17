@@ -225,6 +225,7 @@ function refresh() {
   echo "  Restarting master and node processes in cluster '${cluster_id}'..."
   run_on_nodes "${MASTER_NAME}"                systemctl start openshift-master.service
   run_on_nodes "${MASTER_NAME}|${NODE_PREFIX}" systemctl start openshift-node.service
+  run_on_nodes "${NODE_PREFIX}" ovs-ofctl -O OpenFlow13 del-flows br0
 
   if [[ -n "${wait_for_cluster}" ]]; then
     wait-for-cluster "${config_root}" "$(count-nodes)"

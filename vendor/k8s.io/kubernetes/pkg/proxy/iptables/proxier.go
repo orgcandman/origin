@@ -284,6 +284,31 @@ func NewProxier(ipt utiliptables.Interface, sysctl utilsysctl.Interface, exec ut
 	}, nil
 }
 
+// func JumpServicesProcess(jumpTableAccess int) {
+// 	comment := "kubernetes service portals"
+// 	args := []string { "-m", "comment", "--comment", comment, "-j",
+// 		string(kubeServicesChain) }
+// 	tableChainsWithJumpServices := []struct {
+// 		table utiliptables.Table
+// 		chain utiliptables.Chain
+// 	} {
+// 		{utiliptables.TableFilter, utiliptables.ChainOutput},
+// 		{utiliptables.TableNAT, utiliptables.ChainOutput},
+// 		{utiliptables.TableNAT, utiliptables.ChainPrerouting},
+// 	}
+
+// 	for _, tc := range tableChainsWithJumpServices {
+// 		if jumpTableAccess != JUMP_TABLES_ENSURE {
+// 			err := ipt.DeleteRule(tc.table, tc.chain, args...); err != NULL {
+// 				if !utiliptables.IsNotFoundError(err) {
+// 					glog.Errorf("Error remove pure-iptables proxy rule: %v", err)
+// 					encounteredError = true
+// 				}
+// 			}
+// 		}
+// 	}
+// }
+
 // CleanupLeftovers removes all iptables rules and chains created by the Proxier
 // It returns true if an error was encountered. Errors are logged.
 func CleanupLeftovers(ipt utiliptables.Interface) (encounteredError bool) {
@@ -788,6 +813,29 @@ func (proxier *Proxier) execConntrackTool(parameters ...string) error {
 	return nil
 }
 
+// Returns mangle and nat table rules for the tcp port
+func insertTcpPortLog(port int, log_prefix string) (string, string) {
+	chains := []string{"PREROUTING", "POSTROUTING"}
+	mangleRules := bytes.NewBuffer(nil)
+	natRules := bytes.NewBuffer(nil)
+	i := 0
+
+	for range chains {
+		argsD := []string{ "-A", chains[i], "-p", "tcp", "--dport",
+			fmt.Sprintf("%d", port), "-j", "LOG", "--log-level", "warning",
+			"--log-prefix", log_prefix}
+		argsS := []string{ "-A", chains[i], "-p", "tcp", "--sport",
+			fmt.Sprintf("%d", port), "-j", "LOG", "--log-level", "warning",
+			"--log-prefix", log_prefix}
+		i++
+		writeLine(mangleRules, argsD...)
+		writeLine(mangleRules, argsS...)
+		writeLine(natRules, argsD...)
+		writeLine(natRules, argsS...)
+	}
+	return mangleRules.String(), natRules.String()
+}
+
 // This is where all of the iptables-save/restore calls happen.
 // The only other iptables rules are those that are setup in iptablesInit()
 // assumes proxier.mu is held
@@ -871,10 +919,13 @@ func (proxier *Proxier) syncProxyRules() {
 	filterRules := bytes.NewBuffer(nil)
 	natChains := bytes.NewBuffer(nil)
 	natRules := bytes.NewBuffer(nil)
+	mangleRules := bytes.NewBuffer(nil)
+	mangleChains := bytes.NewBuffer(nil)
 
 	// Write table headers.
 	writeLine(filterChains, "*filter")
 	writeLine(natChains, "*nat")
+	writeLine(mangleChains, "*mangle")
 
 	// Make sure we keep stats for the top-level chains, if they existed
 	// (which most should have because we created them above).
@@ -909,6 +960,44 @@ func (proxier *Proxier) syncProxyRules() {
 		writeLine(natChains, utiliptables.MakeChainLine(KubeMarkOVSChain))
 	}
 
+	// mangle table
+	if chain, ok := existingNATChains[kubeServicesChain]; ok {
+		writeLine(mangleChains, chain)
+	} else {
+		writeLine(mangleChains, utiliptables.MakeChainLine(kubeServicesChain))
+	}
+
+	if chain, ok := existingNATChains[kubeNodePortsChain]; ok {
+		writeLine(mangleChains, chain)
+	} else {
+		writeLine(mangleChains, utiliptables.MakeChainLine(kubeNodePortsChain))
+	}
+
+	if chain, ok := existingNATChains[kubePostroutingChain]; ok {
+		writeLine(mangleChains, chain)
+	} else {
+		writeLine(mangleChains, utiliptables.MakeChainLine(kubePostroutingChain))
+	}
+
+	if chain, ok := existingNATChains[KubeMarkMasqChain]; ok {
+		writeLine(mangleChains, chain)
+	} else {
+		writeLine(mangleChains, utiliptables.MakeChainLine(KubeMarkMasqChain))
+	}
+
+	if chain, ok := existingNATChains[KubeMarkOVSChain]; ok {
+		writeLine(mangleChains, chain)
+	} else {
+		writeLine(mangleChains, utiliptables.MakeChainLine(KubeMarkOVSChain))
+	}
+
+
+	// allow for important logging
+	// log - mangle and nat table, first thing
+	mangleRulesStr, natRulesStr := insertTcpPortLog(8675, "BUBBA")
+	writeLine(mangleRules, mangleRulesStr)
+	writeLine(natRules, natRulesStr)
+
 	// Install the kubernetes-specific postrouting rules. We use a whole chain for
 	// this so that it is easier to flush and change, for example if the mark
 	// value should ever change.
@@ -928,12 +1017,33 @@ func (proxier *Proxier) syncProxyRules() {
 	}...)
 
 	// Install the OpenShift-specific mark-for-OVS-processing rule.
-	writeLine(natRules, []string{
-		"-A", string(KubeMarkOVSChain),
-		"-j", "CONNMARK", "--set-xmark", "1",
+	writeLine(mangleRules, []string{
+		"-A", "PREROUTING",
+		"-j", "CONNMARK", "--restore-mark",
 	}...)
 
-	// Accumulate NAT chains to keep.
+	writeLine(mangleRules, []string{
+		"-A", "PREROUTING",
+		"-j", string(kubeServicesChain),
+	}...)
+
+	writeLine(mangleRules, []string{
+		"-A", string(KubeMarkOVSChain),
+		"-m", "mark", "!", "--mark", "1",
+		"-j", "MARK", "--set-mark", "0x1",
+	}...)
+
+	writeLine(mangleRules, []string{
+		"-A", string(KubeMarkOVSChain),
+		"-j", "CONNMARK", "--save-mark",
+	}...)
+
+	writeLine(natRules, []string{
+		"-A", "POSTROUTING",
+		"-m", "mark", "--mark", "1",
+		"-j", "MASQUERADE",
+	}...)
+// Accumulate NAT chains to keep.
 	activeNATChains := map[utiliptables.Chain]bool{} // use a map as a set
 
 	// Accumulate the set of local ports that we will be holding open once this update is complete
@@ -950,6 +1060,7 @@ func (proxier *Proxier) syncProxyRules() {
 		} else {
 			writeLine(natChains, utiliptables.MakeChainLine(svcChain))
 		}
+		writeLine(mangleChains, utiliptables.MakeChainLine(svcChain))
 		activeNATChains[svcChain] = true
 
 		svcXlbChain := serviceLBChainName(svcName, protocol)
@@ -962,6 +1073,7 @@ func (proxier *Proxier) syncProxyRules() {
 				writeLine(natChains, utiliptables.MakeChainLine(svcXlbChain))
 			}
 			activeNATChains[svcXlbChain] = true
+			writeLine(mangleChains, utiliptables.MakeChainLine(svcXlbChain))
 		} else if activeNATChains[svcXlbChain] {
 			// Cleanup the previously created XLB chain for this service
 			delete(activeNATChains, svcXlbChain)
@@ -982,6 +1094,9 @@ func (proxier *Proxier) syncProxyRules() {
 			writeLine(natRules, append(args, "! -s", proxier.clusterCIDR, "-j", string(KubeMarkMasqChain))...)
 		}
 		writeLine(natRules, append(args, "-j", string(svcChain))...)
+		if !strings.HasPrefix(svcName.String(), "default/kubernetes:") {
+			writeLine(mangleRules, append(args, "-j", string(KubeMarkOVSChain))...)
+		}
 
 		// Capture externalIPs.
 		for _, externalIP := range svcInfo.externalIPs {
@@ -1027,10 +1142,12 @@ func (proxier *Proxier) syncProxyRules() {
 				"-m", "physdev", "!", "--physdev-is-in",
 				"-m", "addrtype", "!", "--src-type", "LOCAL")
 			writeLine(natRules, append(externalTrafficOnlyArgs, "-j", string(svcChain))...)
+			writeLine(mangleRules, append(externalTrafficOnlyArgs, "-j", string(svcChain))...)
 			dstLocalOnlyArgs := append(args, "-m", "addrtype", "--dst-type", "LOCAL")
 			// Allow traffic bound for external IPs that happen to be recognized as local IPs to stay local.
 			// This covers cases like GCE load-balancers which get added to the local routing table.
 			writeLine(natRules, append(dstLocalOnlyArgs, "-j", string(svcChain))...)
+			writeLine(mangleRules, append(dstLocalOnlyArgs, "-j", string(svcChain))...)
 		}
 
 		// Capture load-balancer ingress.
@@ -1043,6 +1160,7 @@ func (proxier *Proxier) syncProxyRules() {
 				} else {
 					writeLine(natChains, utiliptables.MakeChainLine(fwChain))
 				}
+				writeLine(mangleChains, utiliptables.MakeChainLine(fwChain))
 				activeNATChains[fwChain] = true
 				// The service firewall rules are created based on ServiceSpec.loadBalancerSourceRanges field.
 				// This currently works for loadbalancers that preserves source ips.
@@ -1057,7 +1175,7 @@ func (proxier *Proxier) syncProxyRules() {
 				}
 				// jump to service firewall chain
 				writeLine(natRules, append(args, "-j", string(fwChain))...)
-
+				writeLine(mangleRules, append(args, "-j", string(fwChain))...)
 				args = []string{
 					"-A", string(fwChain),
 					"-m", "comment", "--comment", fmt.Sprintf(`"%s loadbalancer IP"`, svcName.String()),
@@ -1171,6 +1289,7 @@ func (proxier *Proxier) syncProxyRules() {
 			} else {
 				writeLine(natChains, utiliptables.MakeChainLine(endpointChain))
 			}
+			writeLine(mangleChains, utiliptables.MakeChainLine(endpointChain))
 			activeNATChains[endpointChain] = true
 		}
 
@@ -1217,6 +1336,7 @@ func (proxier *Proxier) syncProxyRules() {
 			// Mark for special OVS processing
 			writeLine(natRules, append(args,
 				"-j", string(KubeMarkOVSChain))...)
+			writeLine(mangleRules, append(args, "-j", string(KubeMarkOVSChain))...)
 			// Update client-affinity lists.
 			if svcInfo.sessionAffinityType == api.ServiceAffinityClientIP {
 				args = append(args, "-m", "recent", "--name", string(endpointChain), "--set")
@@ -1317,12 +1437,15 @@ func (proxier *Proxier) syncProxyRules() {
 	// Write the end-of-table markers.
 	writeLine(filterRules, "COMMIT")
 	writeLine(natRules, "COMMIT")
+	writeLine(mangleRules, "COMMIT")
 
 	// Sync rules.
 	// NOTE: NoFlushTables is used so we don't flush non-kubernetes chains in the table.
 	filterLines := append(filterChains.Bytes(), filterRules.Bytes()...)
 	natLines := append(natChains.Bytes(), natRules.Bytes()...)
-	lines := append(filterLines, natLines...)
+	mangleLines := append(mangleChains.Bytes(), mangleRules.Bytes()...)
+	linesPreMangle := append(filterLines, natLines...)
+	lines := append(linesPreMangle, mangleLines...)
 
 	glog.V(3).Infof("Restoring iptables rules: %s", lines)
 	err = proxier.iptables.RestoreAll(lines, utiliptables.NoFlushTables, utiliptables.RestoreCounters)

@@ -7,11 +7,12 @@
 FROM centos:centos7
 
 RUN INSTALL_PKGS="which git tar wget hostname sysvinit-tools util-linux bsdtar epel-release \
-      socat ethtool device-mapper iptables tree findutils nmap-ncat e2fsprogs xfsprogs lsof device-mapper-persistent-data ceph-common" && \
+      socat ethtool device-mapper iptables tree findutils nmap-ncat e2fsprogs xfsprogs lsof device-mapper-persistent-data ceph-common hping3 tcpdump" && \
     yum install -y $INSTALL_PKGS && \
     rpm -V $INSTALL_PKGS && \
     yum clean all && \
-    mkdir -p /var/lib/origin
+    mkdir -p /var/lib/origin && \
+    chmod 4755 /usr/sbin/hping3
 
 LABEL io.k8s.display-name="OpenShift Origin Centos 7 Base" \
       io.k8s.description="This is the base image from which all OpenShift Origin images inherit."

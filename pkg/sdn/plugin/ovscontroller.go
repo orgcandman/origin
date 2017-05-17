@@ -77,7 +77,7 @@ func (oc *ovsController) SetupOVS(clusterNetworkCIDR, serviceNetworkCIDR, localS
 	otx := oc.ovs.NewTransaction()
 	// Table 0: initial dispatch based on in_port
 	if !masqServices {
-		otx.AddFlow("table=0, priority=300, ip, ct_zone=0, actions=ct(zone=1,table=0)")
+		otx.AddFlow("table=0, priority=300, ip, ct_state=-trk, actions=ct(table=0)")
 	}
 	// vxlan0
 	otx.AddFlow("table=0, priority=200, in_port=1, arp, nw_src=%s, nw_dst=%s, actions=move:NXM_NX_TUN_ID[0..31]->NXM_NX_REG0[],goto_table:10", clusterNetworkCIDR, localSubnetCIDR)
@@ -123,7 +123,7 @@ func (oc *ovsController) SetupOVS(clusterNetworkCIDR, serviceNetworkCIDR, localS
 	if masqServices {
 		otx.AddFlow("table=30, priority=100, ip, nw_dst=%s, actions=goto_table:60", serviceNetworkCIDR)
 	} else {
-		otx.AddFlow("table=30, priority=300, ip, nw_dst=%s, ct_state=+rpl, ct_mark=1, actions=output:2", localSubnetCIDR)
+		otx.AddFlow("table=30, priority=300, ip, nw_dst=%s, ct_state=+trk+rpl, ct_mark=1, actions=output:2", localSubnetCIDR)
 		otx.AddFlow("table=30, priority=100, ip, nw_dst=%s, actions=output:2", serviceNetworkCIDR)
 	}
 	otx.AddFlow("table=30, priority=200, ip, nw_dst=%s, actions=goto_table:70", localSubnetCIDR)

@@ -21,7 +21,11 @@ RUN dnf -y update && dnf -y install\
  bridge-utils\
  ethtool\
  iptables-services\
- openvswitch\
+ tcpdump\
+ nmap-ncat\
+ dropwatch\
+ conntrack-tools\
+ && dnf install -y http://aaron.bytheb.org/files/openvswitch-2.6.2-1.fc25.x86_64.rpm\
  && dnf clean all
 
 # A default deny firewall (either iptables or firewalld) is
