@@ -87,6 +87,7 @@ func (oc *ovsController) SetupOVS(clusterNetworkCIDR, serviceNetworkCIDR, localS
 	// tun0
 	if !masqServices {
 		otx.AddFlow("table=0, priority=400, in_port=2, ip, nw_src=%s, actions=goto_table:30", localSubnetGateway)
+		otx.AddFlow("table=0, priority=350, in_port=2, ip, ct_mark=1, nw_src=%s, nw_dst=%s, actions=goto_table:70", serviceNetworkCIDR, localSubnetCIDR)
 		otx.AddFlow("table=0, priority=300, in_port=2, ip, nw_src=%s, nw_dst=%s, ct_mark=1, actions=goto_table:25", localSubnetCIDR, clusterNetworkCIDR)
 	}
 	otx.AddFlow("table=0, priority=250, in_port=2, ip, nw_dst=224.0.0.0/4, actions=drop")
