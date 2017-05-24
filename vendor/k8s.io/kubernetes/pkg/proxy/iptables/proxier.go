@@ -1038,11 +1038,6 @@ func (proxier *Proxier) syncProxyRules() {
 		"-j", "CONNMARK", "--save-mark",
 	}...)
 
-	writeLine(natRules, []string{
-		"-A", "POSTROUTING",
-		"-m", "mark", "--mark", "1",
-		"-j", "MASQUERADE",
-	}...)
 // Accumulate NAT chains to keep.
 	activeNATChains := map[utiliptables.Chain]bool{} // use a map as a set
 
